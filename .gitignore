@@ -1,0 +1,4 @@
+.env
+browser-profile/
+debug/
+node_modules/

@@ -1,0 +1,11 @@
+{
+  "name": "fuhe-booking",
+  "private": true,
+  "scripts": {
+    "check": "node check.js",
+    "book": "node book.js"
+  },
+  "dependencies": {
+    "playwright": "1.48.2"
+  }
+}
