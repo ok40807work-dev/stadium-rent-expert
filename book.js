@@ -62,17 +62,51 @@ async function dismissMessageBox(page) {
   return text || '（網站跳出提示）';
 }
 
+// 打開預約頁，等到畫面確定是三種狀態之一：預約頁（已登入）、「請先登入會員」提示框、登入頁
+async function openOrderPage(page) {
+  await page.goto(ORDER_URL);
+  const tab = page.locator(`#tab-${cfg.id3rd}`);
+  const needLogin = page.locator('.el-message-box:visible', { hasText: '請先登入' });
+  const loginForm = page.getByPlaceholder('請輸入驗證碼');
+  await Promise.race([
+    tab.waitFor({ timeout: 60000 }),
+    needLogin.waitFor({ timeout: 60000 }),
+    loginForm.waitFor({ timeout: 60000 }),
+  ]).catch(() => {});
+  if (await tab.count()) return 'ok';
+  if (await needLogin.count()) {
+    await needLogin.locator('.el-message-box__btns button').last().click().catch(() => {});
+    return 'login';
+  }
+  if (await loginForm.count()) return 'login';
+  return 'unknown';
+}
+
 async function login(page) {
   const { VBS_ACCOUNT, VBS_PASSWORD } = process.env;
-  await page.goto(ORDER_URL);
-  await page.waitForLoadState('networkidle');
-  await page.getByRole('button', { name: '確認' }).click({ timeout: 3000 }).catch(() => {});
-  if (!page.url().includes('/login')) return;
-  await page.getByPlaceholder('請輸入電子信箱或統一編號').fill(VBS_ACCOUNT);
-  await page.getByPlaceholder('請輸入密碼').fill(VBS_PASSWORD);
-  await page.getByPlaceholder('請輸入驗證碼').focus();
-  console.log('\n>>> 已填好帳號密碼。請在瀏覽器輸入驗證碼並按「登入」（最多等 5 分鐘）\n');
-  await page.waitForURL((u) => !u.pathname.startsWith('/login'), { timeout: 5 * 60 * 1000 });
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const state = await openOrderPage(page);
+    if (state === 'ok') return;
+    if (state === 'unknown') {
+      await saveDebug(page, 'login');
+      throw new Error('無法判斷預約頁狀態');
+    }
+
+    // 按提示框的「確認」後網站應該會跳到登入頁；沒跳的話自己開
+    await page.waitForURL((u) => u.pathname.startsWith('/login'), { timeout: 10000 })
+      .catch(() => page.goto(`${SITE}/login`));
+    const captcha = page.getByPlaceholder('請輸入驗證碼');
+    await captcha.waitFor({ timeout: 30000 });
+    await page.getByPlaceholder('請輸入電子信箱或統一編號').fill(VBS_ACCOUNT);
+    await page.getByPlaceholder('請輸入密碼').fill(VBS_PASSWORD);
+    await captcha.focus();
+    console.log('\n>>> 已填好帳號密碼。請在瀏覽器輸入驗證碼並按「登入」（最多等 5 分鐘）\n');
+    await page.waitForURL((u) => !u.pathname.startsWith('/login'), { timeout: 5 * 60 * 1000 });
+    await page.waitForLoadState('networkidle');
+    // 回到迴圈開頭重新打開預約頁，確認真的已登入
+  }
+  await saveDebug(page, 'login');
+  throw new Error('登入後仍然被要求登入，請把 debug 資料夾的檔案傳給我');
 }
 
 // ---------- 預約頁：勾選時段 ----------
@@ -281,9 +315,8 @@ async function confirmAndSubmit(page, batchDates) {
   while (queue.length) {
     batchNo++;
     console.log(`\n===== 第 ${batchNo} 張申請單（剩 ${queue.length} 天待處理）=====`);
-    await page.goto(ORDER_URL);
+    await login(page); // 打開預約頁；登入過期時會重新請你輸入驗證碼
     await page.waitForLoadState('networkidle');
-    if (page.url().includes('/login')) await login(page);
 
     // 依序嘗試日期，直到勾滿 10 天（勾不到的日期不佔名額）
     const batch = [];
