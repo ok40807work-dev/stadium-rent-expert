@@ -16,10 +16,11 @@
     id2nd: 295,            // 溪洲[福和]河濱公園 壘球場
     id3rd: 285,            // B 面（A=280, C=286）
     ty: 'O',
-    from: '2026-11-01',
+    from: '2026-11-01',            // 申請期間（含）
     to: '2026-12-31',
-    weekday: 5,            // 週五（0=週日, 1=週一 ... 6=週六）
-    hours: [8, 9, 10],     // 08:00-11:00，每個數字代表一小時
+    weekdays: [1, 2, 3, 4, 5],     // 星期幾（0=週日, 1=週一 ... 6=週六）；這裡是週一到週五
+    daysOfMonth: [16, 31],         // 每月幾號到幾號；[16, 31] 是下半月（月底不足 31 日也沒關係），整個月填 [1, 31]
+    hours: [19, 20, 21],           // 19:00-22:00，每個數字代表一小時
 
     // 活動資料（選項文字要和網站上顯示的一模一樣）
     form: {
@@ -69,7 +70,10 @@
   function targetDates() {
     const out = [];
     for (let d = new Date(CONFIG.from + 'T00:00:00'); d <= new Date(CONFIG.to + 'T00:00:00'); d.setDate(d.getDate() + 1)) {
-      if (d.getDay() === CONFIG.weekday) out.push(d.toLocaleDateString('sv-SE'));
+      const [first, last] = CONFIG.daysOfMonth;
+      if (CONFIG.weekdays.includes(d.getDay()) && d.getDate() >= first && d.getDate() <= last) {
+        out.push(d.toLocaleDateString('sv-SE'));
+      }
     }
     return out;
   }
