@@ -20,7 +20,6 @@
     to: '2026-12-31',
     weekday: 5,            // 週五（0=週日, 1=週一 ... 6=週六）
     hours: [8, 9, 10],     // 08:00-11:00，每個數字代表一小時
-    maxDaysPerOrder: 10,   // 網站規定每張申請單最多 10 個平日
 
     // 活動資料（選項文字要和網站上顯示的一模一樣）
     form: {
@@ -33,13 +32,24 @@
     },
   };
 
+  // 體育局對單一帳號的登記限制
+  const LIMITS = {
+    hoursPerDay: 4,
+    hoursPerWeek: 16,
+    weekdaysPerMonth: 10,
+    holidaysPerMonth: 2,
+    // 開放登記：上午 8–12 時、下午 1–5 時、晚間 6–10 時
+    openHours: [8, 9, 10, 11, 13, 14, 15, 16, 18, 19, 20, 21],
+  };
+
+  const API = 'https://api.preordervenue.com';
   const ORDER_URL = `/order?id2nd=${CONFIG.id2nd}&ty=${CONFIG.ty}`;
   const KEY = 'stadium-rent-expert:v1';
 
   // ---------- 狀態（存在這個網站的 localStorage，重新整理頁面後可接續） ----------
 
   function freshState() {
-    return { running: false, phase: 'select', queue: [], batch: [], done: [], log: [] };
+    return { running: false, phase: 'select', queue: [], batch: [], done: [], holidays: [], log: [] };
   }
   function load() {
     try { return { ...freshState(), ...JSON.parse(localStorage.getItem(KEY)) }; } catch { return freshState(); }
@@ -62,6 +72,82 @@
       if (d.getDay() === CONFIG.weekday) out.push(d.toLocaleDateString('sv-SE'));
     }
     return out;
+  }
+
+  // ---------- 體育局登記限制 ----------
+
+  function validateConfig() {
+    const closed = CONFIG.hours.filter((h) => !LIMITS.openHours.includes(h));
+    if (closed.length) return `時段 ${closed.map((h) => `${h}:00`).join('、')} 不開放登記（開放 8–12、13–17、18–22 時）`;
+    if (CONFIG.hours.length > LIMITS.hoursPerDay) return `每天最多登記 ${LIMITS.hoursPerDay} 小時，目前設定 ${CONFIG.hours.length} 小時`;
+    return null;
+  }
+
+  // 以週一為一週的開始
+  function weekKey(date) {
+    const d = new Date(date + 'T00:00:00');
+    d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+    return d.toLocaleDateString('sv-SE');
+  }
+
+  async function fetchSchedule(year, month) {
+    const res = await fetch(`${API}/api/Order/Member/Schedule`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id3rd: CONFIG.id3rd, year, month, ty: CONFIG.ty }),
+    });
+    if (!res.ok) throw new Error(`查詢 ${year}-${month} 時段失敗（HTTP ${res.status}）`);
+    return res.json();
+  }
+
+  // 依時段狀態與每月、每週上限排出要申請的日期
+  async function buildQueue() {
+    const dates = targetDates();
+    const months = [...new Set(dates.map((d) => d.slice(0, 7)))];
+    const slots = new Map();
+    for (const ym of months) {
+      const [y, m] = ym.split('-').map(Number);
+      for (const r of await fetchSchedule(y, m)) slots.set(`${r.date.slice(0, 10)} ${r.hour}`, r);
+    }
+
+    // 已申請成功的日期也算進上限
+    const holidays = new Set(state.holidays);
+    const done = new Set(state.done);
+    const monthCount = {};
+    const weekHours = {};
+    const count = (d, isHoliday) => {
+      const k = `${d.slice(0, 7)}:${isHoliday ? 'holiday' : 'weekday'}`;
+      monthCount[k] = (monthCount[k] || 0) + 1;
+      weekHours[weekKey(d)] = (weekHours[weekKey(d)] || 0) + CONFIG.hours.length;
+    };
+    for (const d of done) count(d, holidays.has(d));
+
+    const queue = [];
+    for (const d of dates) {
+      if (done.has(d)) continue;
+      const rs = CONFIG.hours.map((h) => slots.get(`${d} ${h}`));
+      const taken = rs.find((r) => !r || r.eventName || !r.isOrderAble || r.isExpired);
+      if (taken) {
+        log(`略過 ${d}：${taken?.eventName || (taken?.isExpired ? '已過期' : '不開放租借')}`);
+        continue;
+      }
+      const isHoliday = rs.some((r) => r.isHoliday);
+      const k = `${d.slice(0, 7)}:${isHoliday ? 'holiday' : 'weekday'}`;
+      const cap = isHoliday ? LIMITS.holidaysPerMonth : LIMITS.weekdaysPerMonth;
+      if ((monthCount[k] || 0) >= cap) {
+        log(`略過 ${d}：超過每月${isHoliday ? '假日' : '平日'} ${cap} 天上限`);
+        continue;
+      }
+      if ((weekHours[weekKey(d)] || 0) + CONFIG.hours.length > LIMITS.hoursPerWeek) {
+        log(`略過 ${d}：超過每週 ${LIMITS.hoursPerWeek} 小時上限`);
+        continue;
+      }
+      count(d, isHoliday);
+      if (isHoliday) holidays.add(d);
+      queue.push(d);
+    }
+    state.holidays = [...holidays];
+    return queue;
   }
 
   // ---------- 面板 ----------
@@ -87,10 +173,16 @@
     $log.textContent = state.log.slice(-40).join('\n');
     $log.scrollTop = $log.scrollHeight;
   }
-  panel.querySelector('[data-start]').onclick = () => {
+  panel.querySelector('[data-start]').onclick = async () => {
+    const err = validateConfig();
+    if (err) { log(`設定不符合體育局規定：${err}`); return; }
     if (!state.queue.length && !state.batch.length) {
-      const done = new Set(state.done);
-      state.queue = targetDates().filter((d) => !done.has(d));
+      try {
+        state.queue = await buildQueue();
+      } catch (e) {
+        log(`錯誤：${e.message}`);
+        return;
+      }
       state.phase = 'select';
       if (!state.queue.length) { log('沒有需要申請的日期'); return; }
       log(`開始：共 ${state.queue.length} 天待申請`);
@@ -274,7 +366,9 @@
     state.batch = [];
     save();
 
-    while (state.queue.length && state.batch.length < CONFIG.maxDaysPerOrder) {
+    // 一張申請單只放同一個月份的日期（每月上限已在排佇列時套用）
+    const month = state.queue[0]?.slice(0, 7);
+    while (state.queue.length && state.queue[0].startsWith(month)) {
       if (!state.running) return;
       const d = state.queue.shift();
       save();
